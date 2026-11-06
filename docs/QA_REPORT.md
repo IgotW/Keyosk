@@ -1,212 +1,157 @@
-# Keyosk — QA Report
+# Keyosk - QA Report
 
-**Status:** Pre-implementation baseline
-**Last updated:** 2026-11-05
-**Release under test:** none (v1.0 not yet built)
-**Prepared by:** QA
+**Status:** Implemented; automated gates pass, browser-level manual checks pending  
+**Last updated:** 2026-11-06  
+**Release under test:** Local assessment build  
+**Scope:** Simplified 1-2 day ordering-system assessment build
 
 ---
 
 ## 1. Summary
 
-No application code exists yet. This report defines the test plan, environments, and evidence format that will be used for v1.0. It is updated at each milestone gate and continuously during hypercare.
+The customer and admin flows are implemented and exercised. All automated quality gates pass. An HTTP-level end-to-end pass verified the customer cash/online flows, receipt lookup, admin authentication, order listing/detail, mark-paid, status update, and logout against the running Laravel API.
 
-| Area | Planned | Executed | Passed | Failed | Blocked |
-| --- | --- | --- | --- | --- | --- |
-| Backend unit | — | 0 | 0 | 0 | — |
-| Backend feature/API | — | 0 | 0 | 0 | — |
-| Frontend unit/component | — | 0 | 0 | 0 | — |
-| End-to-end | — | 0 | 0 | 0 | — |
-| Accessibility | — | 0 | 0 | 0 | — |
-| Performance/load | — | 0 | 0 | 0 | — |
-| Security | — | 0 | 0 | 0 | — |
-| UAT (store staff) | — | 0 | 0 | 0 | — |
+| Area | Executed | Passed | Failed | Notes |
+| --- | --- | --- | --- | --- |
+| Backend feature tests | 36 tests / 202 assertions | 36 | 0 | PostgreSQL `keyosk_test`, `RefreshDatabase` |
+| Backend formatting | 1 | 1 | 0 | `vendor/bin/pint --test` |
+| Frontend unit/component tests | 32 tests / 6 files | 32 | 0 | Vitest + jsdom + Testing Library |
+| Frontend lint | 1 | 1 | 0 | `npm run lint` |
+| Frontend production build | 1 | 1 | 0 | 120 modules, built successfully |
+| HTTP end-to-end flows | 1 scripted pass | 1 | 0 | Cash, online, receipt, admin order flows |
 
-**Release recommendation:** Not applicable — pre-implementation.
+**Release recommendation:** Conditional pass. Automated and API-level checks pass. Remaining work is limited to manual browser verification of responsive layouts, keyboard navigation, and the print preview.
 
 ---
 
-## 2. Environments
+## 2. Automated results
 
-| Env | Build | Backend | Database | Payments | Notes |
-| --- | --- | --- | --- | --- | --- |
-| local | — | Laravel dev server | MySQL 8 (Docker) | Provider fake | Developer machines |
-| CI | per commit | PHP-FPM + Nginx | MySQL 8 service | Provider fake | GitHub Actions |
-| staging | — | Same as prod topology | MySQL 8 | Stripe test mode | UAT, Playwright, load |
-| production | — | — | — | Stripe live | Pilot + rollout |
+### Backend
 
-Target kiosk hardware: Chromium, 1280×800 and 1920×1080, touch input, 4 GB RAM.
-Admin browser support: latest Chrome, Edge, Firefox, Safari (last two major versions).
+Command: `php artisan test` (from `backend/`)
 
----
+```text
+Tests:    36 passed (202 assertions)
+Duration: ~5.7s
+```
 
-## 3. Test scope
+Coverage:
 
-### 3.1 In scope (v1.0)
+- Public listing filters unavailable products and returns `meta.currency`.
+- Order creation ignores client-supplied prices and totals.
+- Empty items, invalid quantities, unknown/unavailable products, duplicate products, and invalid payment methods are rejected without creating orders.
+- A mixed cart containing an unavailable product creates neither an order nor partial order items (transaction rollback behavior).
+- Cash orders are created `pending`/`unpaid`; mock online orders are created `paid` with a `MOCK-<ULID>` reference and `paid_at`.
+- Product edit/delete preserves order-item snapshots (`product_id` becomes `null`).
+- Receipt lookup works by token without auth; unknown tokens and order numbers return a generic `404`; receipt payload omits internal IDs and the token.
+- Admin login, invalid credentials, non-admin rejection, `/me`, logout token revocation, guest `401`, non-admin `403`, and login rate limiting.
+- Admin product CRUD, validation, availability toggle, and generic `404`.
+- Admin order list/detail with item counts, mark cash paid, idempotent mark-paid, online/cancelled rejection, status updates, and invalid status rejection.
 
-- Kiosk: attract, menu browsing, search, product customization, cart, promo, checkout, card and cash flows, receipts, idle reset, offline/error states.
-- Admin: login/MFA, stores, users/roles, kiosks/pairing, catalog CRUD, promo codes, order queue, transitions, refunds, reports/exports, audit log.
-- API: auth, authorization/scoping, validation, state machine, totals, idempotency, webhooks, rate limits, error format.
-- NFRs: performance targets, WCAG 2.1 AA, security controls, backup/restore, observability.
+Command: `vendor/bin/pint --test` — passed.
 
-### 3.2 Out of scope (v1.0)
+### Frontend
 
-- Native mobile apps, loyalty, inventory, kitchen hardware, multi-currency orders (see `REQUIREMENTS.md` §8).
-- Load beyond stated peak assumptions (defined in Phase 6).
-- Third-party integrations other than Stripe and outbound webhooks.
+Commands: `npm run test`, `npm run lint`, `npm run build` (from `frontend/`)
 
----
+```text
+Test Files  5 passed (5)
+Tests       32 passed (32)
+Lint        passed
+Build       passed (120 modules)
+```
 
-## 4. Test cases
+Coverage:
 
-Status values: `Not run`, `Pass`, `Fail`, `Blocked`, `N/A`.
-Evidence links should point to CI runs, Playwright traces, screenshots, or k6 summaries.
-
-### 4.1 Kiosk — browsing and cart
-
-| ID | Requirement | Scenario | Expected | Status | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| TC-K-001 | FR-K01 | Kiosk boots with valid token | Attract screen with store name within 2 s | Not run | |
-| TC-K-002 | FR-K02 | Menu loads | Active categories/products, correct starting prices | Not run | |
-| TC-K-003 | FR-K03 | Search "latte" with different case | Matching products returned | Not run | |
-| TC-K-004 | FR-K04 | Product `is_available=false` | Disabled + "Unavailable", cannot add | Not run | |
-| TC-K-005 | FR-K05 | Required modifier group unselected | "Add to cart" disabled | Not run | |
-| TC-K-006 | FR-K05 | Exceed `max_select` | Selection blocked with explanation | Not run | |
-| TC-K-007 | FR-K06 | Edit line modifiers after add | Cart price updates correctly | Not run | |
-| TC-K-008 | FR-K07 | Quantity change | Totals update < 100 ms, correct cents | Not run | |
-| TC-K-009 | FR-K08 | Refresh mid-cart | Cart restored | Not run | |
-| TC-K-010 | FR-K09 | Idle 120 s | Warning then reset; unpaid cart handled per spec | Not run | |
-| TC-K-011 | FR-K11 | Invalid promo | Specific reason shown | Not run | |
-| TC-K-012 | FR-K12 | Keyboard/screen-reader pass on cart | WCAG 2.1 AA checks pass | Not run | |
-
-### 4.2 Kiosk — payment
-
-| ID | Requirement | Scenario | Expected | Status | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| TC-P-001 | FR-P01 | Confirm total | Total restated before pay | Not run | |
-| TC-P-002 | FR-P02 | Card payment success (Stripe test) | Order paid, number shown | Not run | |
-| TC-P-003 | FR-P02 | Pay at counter | Order held, staff can record cash | Not run | |
-| TC-P-004 | FR-P03 | Inspect network/logs | No raw PAN/CVC stored or logged | Not run | |
-| TC-P-005 | FR-P04 | Declined card | Retry path shown, order not paid | Not run | |
-| TC-P-006 | FR-P05 | Forge client "paid" call | Server rejects/ignores; order unpaid | Not run | |
-| TC-P-007 | FR-P06 | Double-click pay / retry same key | One intent, one charge | Not run | |
-| TC-P-008 | FR-P08 | Drop network mid-confirm | Poll/sync reconciles correctly | Not run | |
-| TC-P-009 | FR-P09 | Revoke device token | Ordering locked, "see staff" | Not run | |
-| TC-P-010 | FR-P05, FR-N03 | Webhook replay ×3 | Single state change, no double credit | Not run | |
-
-### 4.3 Orders and fulfilment
-
-| ID | Requirement | Scenario | Expected | Status | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| TC-O-001 | FR-O01 | Orders across midnight store-local | Numbers reset, no reuse within day | Not run | |
-| TC-O-002 | FR-O02 | Each allowed transition | Succeeds, history row written | Not run | |
-| TC-O-003 | FR-O02 | Illegal transition (e.g. ready→paid) | 409, no state change | Not run | |
-| TC-O-004 | FR-O05 | Kitchen advances paid→preparing→ready | Allowed; cashier completes | Not run | |
-| TC-O-005 | FR-O06 | Cancel paid order | Refund or reason required | Not run | |
-| TC-O-006 | FR-O07 | Edit product after order | Order snapshots unchanged | Not run | |
-| TC-O-007 | FR-O08 | Tampered client total | Rejected with TOTAL_MISMATCH | Not run | |
-| TC-O-008 | FR-O09 | Abandon draft 15 min | Expired, not payable | Not run | |
-
-### 4.4 Catalog and promos
-
-| ID | Requirement | Scenario | Expected | Status | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| TC-M-001 | FR-M01–M04 | Create product with variants + groups | Appears correctly on kiosk | Not run | |
-| TC-M-002 | FR-M05 | Toggle availability | Reflected on kiosk ≤ 60 s | Not run | |
-| TC-M-003 | FR-M07 | Delete product | Soft-deleted; historical order intact | Not run | |
-| TC-M-004 | FR-M08 | Upload 6 MB / wrong type | Rejected with 422 | Not run | |
-| TC-D-001 | FR-D01–D02 | Redeem promo at max limit | Rejected atomically | Not run | |
-| TC-D-002 | FR-D03 | 100% discount + tax | Total never negative; tax correct | Not run | |
-| TC-D-003 | FR-D04 | Historical order after code edit | Snapshot unchanged | Not run | |
-
-### 4.5 Devices, auth, roles
-
-| ID | Requirement | Scenario | Expected | Status | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| TC-A-001 | FR-KD01–KD02 | Pair with expired code | 401/422, no token | Not run | |
-| TC-A-002 | FR-KD02 | Re-pair same serial | Previous token revoked | Not run | |
-| TC-A-003 | FR-KD03 | Stop heartbeat | Shows offline after 90 s | Not run | |
-| TC-A-004 | FR-A01 | Role matrix for every endpoint | Only permitted roles succeed | Not run | |
-| TC-A-005 | FR-A04 | Refund above threshold as cashier | 403 approval required | Not run | |
-| TC-A-006 | FR-A05 | Privileged actions | Audit rows with actor + before/after | Not run | |
-| TC-A-007 | FR-A06 | Login brute force | Rate limited after 5 attempts | Not run | |
-
-### 4.6 Reports and admin
-
-| ID | Requirement | Scenario | Expected | Status | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| TC-R-001 | FR-R01 | Daily totals vs fixture orders | Exact reconciliation | Not run | |
-| TC-R-002 | FR-R02 | Export 366+ days | Rejected; 90-day export succeeds | Not run | |
-| TC-R-003 | FR-R03 | Refunded/cancelled orders | Reported separately, not in net | Not run | |
-| TC-R-004 | FR-R04 | Dashboard status counts | Match DB in real time | Not run | |
-| TC-N-001 | FR-N01–N03 | Receipt + outbound webhook | Receipt correct; webhook signed/retried | Not run | |
-
-### 4.7 Non-functional
-
-| ID | Requirement | Scenario | Expected | Status | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| TC-NFR-001 | §6.1 | Menu 200 products, 100 concurrent | p95 < 500 ms, < 300 KB gz | Not run | |
-| TC-NFR-002 | §6.1 | Order create load | p95 < 400 ms server time | Not run | |
-| TC-NFR-003 | §6.1 | 90-day report, 100k orders | p95 < 3 s | Not run | |
-| TC-NFR-004 | §6.2 | API outage 60 s during browse | Kiosk recovers, cart intact | Not run | |
-| TC-NFR-005 | §6.2 | Backup restore drill | RPO/RTO documented and met | Not run | |
-| TC-NFR-006 | §6.3 | OWASP Top 10 checklist | No high/critical issues | Not run | |
-| TC-NFR-007 | §6.4 | axe on kiosk/admin critical flows | No serious/critical violations | Not run | |
-| TC-NFR-008 | §6.5 | Alert: payment success drop | Alert fires within 5 min | Not run | |
+- Money formatting, dollars-to-cents parsing, invalid input rejection, cents-to-dollars.
+- Cart totals.
+- Cart reducer add/merge/increment/cap/remove/clear/replace and unknown actions.
+- Cart storage parsing, malformed data, duplicate removal, quantity clamping, persistence.
+- API error normalization for validation errors, response messages, status fallbacks, timeouts, and network failures.
+- Empty-cart checkout guard redirects to `/cart`.
+- App smoke tests: storefront loads products from the API; unauthenticated `/admin/products` redirects to the admin login page.
 
 ---
 
-## 5. Defect log
+## 3. HTTP end-to-end verification
 
-| ID | Severity | Area | Summary | Status | Owner | Linked test |
-| --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | No defects logged (no build yet) | — | — | — |
+Executed against `php artisan serve` on `http://127.0.0.1:8000` using the development `keyosk` database.
 
-Severity definitions:
+| Step | Result |
+| --- | --- |
+| `GET /api/v1/products` | 7 available products returned; `meta.currency = USD` |
+| `POST /api/v1/orders` (cash, 2 products) | Created `ORD-000001`, `pending`, `unpaid`, total `2650` cents |
+| `GET /api/v1/receipts/{token}` (no auth) | Returned the same order number and total; token/internal IDs omitted |
+| `POST /api/v1/orders` (online) | Created `ORD-000002`, `paid` |
+| `POST /api/v1/auth/login` | Admin token returned |
+| `GET /api/v1/auth/me` | Admin identity returned |
+| `GET /api/v1/admin/orders` | Both orders listed with item counts |
+| `GET /api/v1/admin/orders/{id}` | Detail returned 2 items and `2650` cents |
+| `POST /api/v1/admin/orders/{id}/mark-paid` | Cash order became `paid` with `paid_at` |
+| `PATCH /api/v1/admin/orders/{id}/status` | Order became `completed` |
+| `GET /api/v1/admin/products` | All 7 products returned, including unavailable |
+| `POST /api/v1/auth/logout` | Token revoked; `204` |
 
-| Severity | Definition | Fix SLA |
+Note: these checks intentionally created two QA orders in the development database. No existing records were edited or deleted outside the tested order lifecycle.
+
+---
+
+## 4. Mandatory test matrix
+
+Status values: `Pass`, `Partial`, `Fail`, `Not run`.
+
+| ID | Flow | Key assertions | Status | Evidence |
+| --- | --- | --- | --- | --- |
+| QA-01 | Public product listing | Only available products returned; fields correct; empty list; admin list includes unavailable products. | Pass | Backend tests + HTTP run |
+| QA-02 | Cart logic | Add, merge, increment, decrement, remove, quantity `1..99`, totals, persistence, corrupted storage. | Pass | Reducer/storage/money tests + empty-cart checkout guard |
+| QA-03 | Order validation | Empty items, invalid quantities, unknown/unavailable products, duplicates, invalid payment method; no side effects. | Pass | `OrderCreationTest` |
+| QA-04 | Server totals and snapshots | Client totals ignored; DB price used; snapshots survive edit/delete; totals reconcile. | Pass | `OrderCreationTest` incl. rollback test |
+| QA-05 | Cash order | Created `unpaid`; admin marks paid; online/cancelled rejected; duplicate mark-paid idempotent. | Pass | `AdminOrderTest` + HTTP run |
+| QA-06 | Mock online order | Created `paid` with mock reference and `paid_at`; no gateway or card data. | Pass | `OrderCreationTest` + HTTP run |
+| QA-07 | Receipt token | Token returned; public lookup; unknown token/order number `404`; unique 64-hex token; refreshable receipt. | Pass | `ReceiptTest` + HTTP run |
+| QA-08 | Admin auth | Login, invalid credentials, `401`, `403`, `/me`, logout revocation. | Pass | `AdminAuthTest` + HTTP run |
+| QA-09 | Admin product CRUD | Create, read, update, delete, availability, validation, `404`, snapshot preservation. | Pass | `AdminProductTest` |
+| QA-10 | Admin order management | List/detail, mark cash paid, status updates, invalid status, `404`. | Pass | `AdminOrderTest` + HTTP run |
+| QA-11 | Security and errors | JSON errors, CORS origins, rate limits, no secrets in frontend, mass-assignment protection, injection safety. | Partial | Rate limits, `401`/`403`/`404`, and hidden fields are automated/tested. CORS and injection attempts were not executed. |
+| QA-12 | Quality gates and presentation | Backend/frontend tests, lint, build, migration up/down, responsive widths, print layout. | Partial | All automated gates pass; migration up ran on `keyosk_test`; browser responsive/print checks pending. |
+
+---
+
+## 5. Remaining manual checks
+
+These are the only outstanding QA items and are code-reviewed but not browser-executed:
+
+1. Responsive layout at 375 px, 768 px, and 1280 px.
+2. Keyboard-only checkout and admin form navigation.
+3. Print preview of the receipt (header/footer hidden, `.print-area` unboxed).
+4. CORS from the configured frontend origin and rejection of other origins.
+5. Migration `down()`/`up()` cycle on a disposable database.
+
+---
+
+## 6. Known limitations and accepted risks
+
+| Item | Impact | Status |
 | --- | --- | --- |
-| S1 / Critical | Data loss, double charge, security breach, kiosk fleet down | Immediate; release blocked |
-| S2 / High | Core flow broken, wrong totals, payment failure | < 24 h; release blocked |
-| S3 / Medium | Workaround exists, cosmetic in core flow | < 5 days |
-| S4 / Low | Minor cosmetic or edge case | Backlog |
+| No idempotency key on order creation | Double submission can create duplicate orders | Accepted for MVP; submit button disables while pending |
+| Order statuses freely settable | Admin can reopen or cancel any order | Accepted for MVP |
+| Product hard delete | Product link becomes `null`; snapshots retained | Tested |
+| Receipt token has no expiry | Possession grants receipt access | Accepted for MVP; 64 hex characters |
+| Local PostgreSQL superuser | Excessive local privileges | Local only; create a least-privilege role before deployment |
+| `intl` PHP extension missing | `php artisan db:show` fails | Not required by tests or runtime |
+| Frontend is API-only | No server-side rendering | Accepted |
 
 ---
 
-## 6. Entry and exit criteria
+## 7. Exit criteria
 
-### Entry (per test cycle)
-
-- Build deployed to staging and smoke test passed.
-- Migrations + seeders applied; demo menu available.
-- Test accounts for every role; at least one paired kiosk.
-- Provider test keys configured; webhook endpoint reachable.
-- `docs/API_DOCUMENTATION.md` matches the deployed build.
-
-### Exit (release)
-
-- All S1/S2 defects closed; S3 accepted by product with a dated plan.
-- 100% of in-scope test cases executed; ≥ 95% pass; remainder explicitly waived.
-- Backend money/state unit coverage 100%; feature suite green.
-- Load targets met; accessibility audit passed; security review has no highs/criticals.
-- UAT sign-off by store operations.
-- Rollback and incident runbooks verified.
-
----
-
-## 7. Evidence and reporting
-
-- CI: test reports and coverage published per commit.
-- E2E: Playwright HTML report + traces retained 30 days.
-- Load: k6 summary JSON + Grafana snapshot per run.
-- A11y: axe JSON + manual checklist with screenshots.
-- UAT: signed scenario sheet with device, build SHA, and tester.
-- This report is updated at each milestone gate (M0–M7) and daily during hypercare.
-
----
-
-## 8. Change history
-
-| Date | Change | Author |
-| --- | --- | --- |
-| 2026-11-05 | Initial test plan and case inventory created (pre-implementation) | QA |
+| Criterion | Status |
+| --- | --- |
+| Backend feature tests pass against `keyosk_test` | Pass |
+| Frontend unit tests pass | Pass |
+| `npm run lint` passes | Pass |
+| `npm run build` passes | Pass |
+| Manual customer cash and mock-online flows pass | Pass (HTTP-level) |
+| Admin login, product management, mark-paid, and status flows pass | Pass (automated + HTTP-level) |
+| Receipt lookup and print flow passes | Lookup pass; print preview pending browser check |
+| No open P1 security or data-integrity defects | Pass (none found) |

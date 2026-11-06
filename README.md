@@ -6,11 +6,11 @@ Self-service ordering kiosks for quick-service restaurants and retail counters. 
 
 ## Architecture
 
-| Part | Path | Stack |
-| --- | --- | --- |
-| API | `backend/` | Laravel 12 (PHP 8.3), MySQL 8, Redis, Sanctum, Stripe |
-| Kiosk + Admin UI | `frontend/` | React 19, Vite 7, TypeScript, Tailwind CSS 4 |
-| Documentation | `docs/` | Requirements, database, API, plan, QA |
+| Part             | Path        | Stack                                                      |
+| ---------------- | ----------- | ---------------------------------------------------------- |
+| API              | `backend/`  | Laravel 12 (PHP 8.3), PostgreSQL, Redis, Sanctum, Paymongo |
+| Kiosk + Admin UI | `frontend/` | React 19, Vite 7, TypeScript, Tailwind CSS 4               |
+| Documentation    | `docs/`     | Requirements, database, API, plan, QA                      |
 
 ## Documentation
 
@@ -39,7 +39,7 @@ npm install
 npm run dev
 ```
 
-Docker Compose will provide MySQL, Redis, and Mailpit; see the implementation plan, Phase 0.
+Docker Compose will provide PostgreSQL, Redis, and Mailpit; see the implementation plan, Phase 0.
 
 ## Product surfaces
 

@@ -1,127 +1,77 @@
 # Keyosk — Database Design
 
-**Status:** Draft v1.0
-**Last updated:** 2026-11-05
-**Target:** MySQL 8.0+ (InnoDB, `utf8mb4_0900_ai_ci`)
+**Status:** Implemented and migrated (`keyosk`, `keyosk_test`)  
+**Last updated:** 2026-11-06  
+**Database:** PostgreSQL 14+ (`pgsql`)  
+**Application database:** `keyosk`  
+**Test database:** `keyosk_test`  
+**Framework:** Laravel 13, Sanctum
+
+This document replaces the previous full-kiosk design. It covers only the confirmed simplified scope: a public storefront, guest checkout, cash or mock online payment, a printable receipt, Sanctum admin login, product management, and basic order management.
+
+> This design is paired with the simplified requirements, API contract, and implementation plan in the same `docs/` directory.
 
 ---
 
-## 1. Conventions
+## 1. Confirmed rules
 
-- Table names are plural `snake_case`; pivot tables are singular-alphabetical (`product_modifier_group`).
-- Primary keys are `BIGINT UNSIGNED AUTO_INCREMENT` named `id`.
-- Foreign keys are `<singular>_id`, `BIGINT UNSIGNED`, with explicit `ON DELETE` behaviour.
-- All tables have `created_at` / `updated_at` (except append-only history tables, which have `created_at` only).
-- Mutable catalog and staff tables use `deleted_at` (soft deletes).
-- **Money** is `BIGINT` (not unsigned where deltas can be negative) in **minor units**.
-- **Percentages/rates** are integer basis points: `825` = 8.25%, `1000` = 10%.
-- Enums are stored as `VARCHAR(32)` with a PHP enum + DB `CHECK` constraint (MySQL 8.0.16+).
-- JSON columns are used only for non-queried metadata (tags, settings, audit snapshots).
-- Order data is immutable after payment except through explicit status/refund records.
+These are fixed by `docs/REQUIREMENTS.md` and must not be changed without approval:
+
+- PostgreSQL is the only database. Do not reset or drop an existing database without approval.
+- Customers do not have accounts. Admin users authenticate with Sanctum bearer tokens.
+- Admin access is controlled by a boolean `users.is_admin` flag.
+- Products have a name, optional description, price, optional image URL, and a single availability toggle.
+- There is no inventory or stock counting. Availability is only a boolean.
+- Money is stored as integer minor units (cents). Floating-point money is prohibited.
+- Product prices, line totals, and order totals must never be negative.
+- Quantity is an integer from 1 to 99.
+- Duplicate product lines in one order are rejected.
+- An order must contain at least one item.
+- Product name, unit price, quantity, and line total are snapshotted on each order item.
+- Order creation runs in a database transaction and recalculates all prices server-side.
+- The order number is unique and human-readable. The receipt number is the same value; no separate receipt number is stored.
+- A separate public receipt token is unique and unguessable.
+- Deleting a product must not delete or modify historical order items.
+- Cash orders are created `unpaid`; an admin may mark them `paid`.
+- Mock online orders are created `paid` with a mock payment reference. No real payment provider or webhook exists.
+- Order status is `pending`, `completed`, or `cancelled`.
+- There are no taxes, discounts, promos, delivery fees, tips, refunds, customer accounts, stores, kiosks, variants, modifiers, categories, or audit tables.
 
 ---
 
-## 2. Entity-relationship diagram
+## 2. Entities and relationships
+
+| Table | Purpose |
+| --- | --- |
+| `users` | Existing Laravel user table plus `is_admin`; admin accounts only. |
+| `products` | Sellable catalog items. |
+| `orders` | One checkout: order number, receipt token, payment fields, status, total. |
+| `order_items` | Immutable line snapshots belonging to an order. |
+
+No additional supporting tables are required. In particular, there is no `payments` table: the scope has exactly one payment per order and the payment is mocked. If a real payment provider is added later, introduce a separate `payments` table at that time.
+
+### ER diagram
 
 ```mermaid
 erDiagram
-    STORES ||--o{ USER_STORE : "scopes"
-    USERS ||--o{ USER_STORE : "assigned"
-    STORES ||--o{ KIOSKS : "has"
-    STORES ||--o{ CATEGORIES : "has"
-    STORES ||--o{ PRODUCTS : "sells"
-    STORES ||--o{ TAX_RATES : "defines"
-    STORES ||--o{ PROMO_CODES : "offers"
-    STORES ||--o{ ORDERS : "receives"
-
-    CATEGORIES ||--o{ PRODUCTS : "groups"
-    TAX_RATES ||--o{ PRODUCTS : "taxes"
-    PRODUCTS ||--o{ PRODUCT_VARIANTS : "has"
-    PRODUCTS }o--o{ MODIFIER_GROUPS : "product_modifier_group"
-    MODIFIER_GROUPS ||--o{ MODIFIERS : "contains"
-
-    KIOSKS ||--o{ ORDERS : "places"
-    USERS ||--o{ ORDERS : "cancels"
-    PROMO_CODES ||--o{ ORDERS : "discounts"
-
-    ORDERS ||--o{ ORDER_ITEMS : "contains"
-    ORDERS ||--o{ ORDER_STATUS_HISTORIES : "logs"
-    ORDERS ||--o{ PAYMENTS : "paid_by"
-    ORDER_ITEMS ||--o{ ORDER_ITEM_MODIFIERS : "customized_by"
-    PAYMENTS ||--o{ REFUNDS : "refunded_by"
-    USERS ||--o{ REFUNDS : "requests"
-
-    STORES {
-        bigint id PK
-        string name
-        string slug UK
-        char currency
-        string timezone
-        boolean tax_inclusive
-        int idle_timeout_seconds
-        boolean is_active
-    }
     USERS {
         bigint id PK
         string email UK
-        string password
-        string role
-        boolean is_active
-    }
-    KIOSKS {
-        bigint id PK
-        bigint store_id FK
-        string name
-        string pairing_code_hash
-        string status
-        timestamp last_seen_at
-    }
-    CATEGORIES {
-        bigint id PK
-        bigint store_id FK
-        string name
-        int sort_order
-        boolean is_active
+        boolean is_admin
     }
     PRODUCTS {
         bigint id PK
-        bigint store_id FK
-        bigint category_id FK
-        bigint tax_rate_id FK
         string name
-        bigint base_price_cents
-        boolean is_active
+        bigint price_cents
         boolean is_available
-    }
-    PRODUCT_VARIANTS {
-        bigint id PK
-        bigint product_id FK
-        string name
-        bigint price_delta_cents
-    }
-    MODIFIER_GROUPS {
-        bigint id PK
-        bigint store_id FK
-        string name
-        int min_select
-        int max_select
-    }
-    MODIFIERS {
-        bigint id PK
-        bigint modifier_group_id FK
-        string name
-        bigint price_delta_cents
     }
     ORDERS {
         bigint id PK
-        bigint store_id FK
-        bigint kiosk_id FK
-        string order_number
-        date business_date
+        string order_number UK
+        char receipt_token UK
         string status
-        bigint subtotal_cents
-        bigint discount_cents
-        bigint tax_cents
+        string payment_method
+        string payment_status
         bigint total_cents
     }
     ORDER_ITEMS {
@@ -129,563 +79,452 @@ erDiagram
         bigint order_id FK
         bigint product_id FK
         string product_name
-        int quantity
+        smallint quantity
         bigint unit_price_cents
         bigint line_total_cents
     }
-    ORDER_ITEM_MODIFIERS {
-        bigint id PK
-        bigint order_item_id FK
-        string modifier_name
-        bigint unit_price_delta_cents
-        int quantity
-    }
-    PAYMENTS {
-        bigint id PK
-        bigint order_id FK
-        string provider
-        string method
-        string status
-        bigint amount_cents
-    }
-    REFUNDS {
-        bigint id PK
-        bigint payment_id FK
-        bigint amount_cents
-        string status
-    }
-    PROMO_CODES {
-        bigint id PK
-        bigint store_id FK
-        string code
-        string type
-        int value
-        int times_redeemed
-    }
-    TAX_RATES {
-        bigint id PK
-        bigint store_id FK
-        string name
-        int rate_bps
-        boolean is_inclusive
-    }
+
+    ORDERS ||--|{ ORDER_ITEMS : contains
+    PRODUCTS |o--o{ ORDER_ITEMS : "optional snapshot source"
 ```
 
----
-
-## 3. Tables
-
-### 3.1 `stores`
-
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| name | VARCHAR(120) | no | | |
-| slug | VARCHAR(80) | no | | unique |
-| address_line1 | VARCHAR(160) | yes | null | |
-| address_line2 | VARCHAR(160) | yes | null | |
-| city | VARCHAR(80) | yes | null | |
-| region | VARCHAR(80) | yes | null | |
-| postal_code | VARCHAR(20) | yes | null | |
-| country | CHAR(2) | yes | null | ISO 3166-1 alpha-2 |
-| phone | VARCHAR(32) | yes | null | |
-| email | VARCHAR(160) | yes | null | Receipt "questions?" address |
-| timezone | VARCHAR(64) | no | `UTC` | IANA name |
-| currency | CHAR(3) | no | `USD` | ISO 4217 |
-| locale | VARCHAR(10) | no | `en` | BCP 47 |
-| tax_inclusive | BOOLEAN | no | false | Pricing display + math mode |
-| receipt_footer | VARCHAR(500) | yes | null | |
-| idle_timeout_seconds | SMALLINT UNSIGNED | no | 120 | 30–1800 |
-| settings | JSON | yes | null | Remote config overrides |
-| is_active | BOOLEAN | no | true | |
-| created_at / updated_at | TIMESTAMP | no | | |
-| deleted_at | TIMESTAMP | yes | null | soft delete |
-
-Indexes: `UNIQUE(slug)`, `INDEX(is_active)`.
+`users` has no foreign-key relationship to orders or products: customers are guests, and admin actions are not audited in this scope. `order_items.product_id` is nullable so a product can be hard-deleted after an order exists.
 
 ---
 
-### 3.2 `users`
+## 3. Conventions
 
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| name | VARCHAR(120) | no | | |
-| email | VARCHAR(160) | no | | unique, lowercased |
-| password | VARCHAR(255) | no | | bcrypt/argon2 hash |
-| role | VARCHAR(32) | no | `cashier` | `admin`, `manager`, `cashier`, `kitchen` |
-| is_active | BOOLEAN | no | true | |
-| mfa_secret | VARCHAR(255) | yes | null | encrypted cast |
-| last_login_at | TIMESTAMP | yes | null | |
-| created_at / updated_at | TIMESTAMP | no | | |
-| deleted_at | TIMESTAMP | yes | null | |
-
-Indexes: `UNIQUE(email)`, `INDEX(role, is_active)`.
-
-### 3.3 `user_store` (pivot)
-
-| Column | Type | Null | Notes |
-| --- | --- | --- | --- |
-| user_id | BIGINT UNSIGNED FK → users | no | cascade on delete |
-| store_id | BIGINT UNSIGNED FK → stores | no | cascade on delete |
-
-Primary key `(user_id, store_id)`. Admins are not required to have rows (global scope); managers/cashiers/kitchen must have at least one.
+- Table names are plural `snake_case`; primary keys are `BIGINT` named `id`.
+- Foreign keys are `<singular>_id` and `BIGINT`.
+- New tables use `TIMESTAMPTZ` for timestamps. Existing framework tables are left unchanged.
+- New audit timestamp columns (`created_at`, `updated_at`) are `NOT NULL DEFAULT now()`; nullable business timestamps such as `paid_at` are noted explicitly. In Laravel, use `->useCurrent()` (and make the column non-nullable); `timestampsTz()` alone produces nullable columns without a default. `order_items` has only `created_at` because order items are immutable.
+- Enumerations use `VARCHAR` plus a named `CHECK` constraint, not PostgreSQL enum types.
+- Money uses `BIGINT` minor units plus `CHECK` constraints. PostgreSQL does not enforce Laravel's `unsigned` modifier, so explicit checks are required.
+- There are no soft deletes and no `deleted_at` columns.
+- There is no stock column, so negative stock cannot occur. Availability is only `products.is_available`.
+- `CHECK` constraints should be added with `DB::statement('ALTER TABLE ... ADD CONSTRAINT ... CHECK (...)')` after `Schema::create()`; this keeps constraint names explicit and works on PostgreSQL.
 
 ---
 
-### 3.4 `kiosks`
+## 4. Tables
 
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| store_id | BIGINT UNSIGNED FK → stores | no | | restrict on delete |
-| name | VARCHAR(80) | no | | e.g. "Front counter left" |
-| serial_number | VARCHAR(120) | yes | null | hardware identifier, unique when set |
-| pairing_code_hash | VARCHAR(255) | yes | null | one-time, cleared after pairing |
-| pairing_expires_at | TIMESTAMP | yes | null | |
-| status | VARCHAR(32) | no | `pending` | `pending`, `active`, `disabled` |
-| app_version | VARCHAR(32) | yes | null | reported by heartbeat |
-| last_seen_at | TIMESTAMP | yes | null | offline if older than 90 s |
-| settings | JSON | yes | null | per-device overrides |
-| created_at / updated_at | TIMESTAMP | no | | |
-| deleted_at | TIMESTAMP | yes | null | |
+### 4.1 `users` (existing table, one new column)
 
-Indexes: `UNIQUE(serial_number)`, `INDEX(store_id, status)`, `INDEX(last_seen_at)`.
-Tokens live in Laravel's `personal_access_tokens` (polymorphic `tokenable`). Tokens are hashed at rest by the framework and carry ability `kiosk`.
+The existing migration `0001_01_01_000000_create_users_table.php` already provides:
 
----
+`id` (BIGINT primary key), `name`, `email` (unique), `email_verified_at`, `password`, `remember_token`, `created_at`, `updated_at`.
 
-### 3.5 `tax_rates`
+Add only:
 
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| store_id | BIGINT UNSIGNED FK → stores | no | | restrict |
-| name | VARCHAR(80) | no | | e.g. "Sales tax" |
-| rate_bps | SMALLINT UNSIGNED | no | | 0–10000 |
-| is_inclusive | BOOLEAN | no | false | Overrides store default when set |
-| is_default | BOOLEAN | no | false | At most one per store |
-| created_at / updated_at | TIMESTAMP | no | | |
+| Column | PostgreSQL type | Laravel type | Null | Default | Constraints / notes |
+| --- | --- | --- | --- | --- | --- |
+| `is_admin` | `BOOLEAN` | `boolean` | no | `false` | Required by admin middleware. Existing rows backfill to `false`. |
 
-Indexes: `INDEX(store_id, is_default)`.
+No index is required for `is_admin`; admin login looks up `email`, which is already unique. Only admin accounts are expected in this scope; there is no role table and no `role` column. A `false` flag simply denies admin routes.
 
----
+### 4.2 `products`
 
-### 3.6 `categories`
+| Column | PostgreSQL type | Laravel type | Null | Default | Constraints / notes |
+| --- | --- | --- | --- | --- | --- |
+| `id` | `BIGINT` | `$table->id()` | no | identity | Primary key. |
+| `name` | `VARCHAR(140)` | `$table->string('name', 140)` | no | — | `CHECK (btrim(name) <> '')`. |
+| `description` | `TEXT` | `$table->text('description')` | yes | `null` | Optional. |
+| `price_cents` | `BIGINT` | `$table->bigInteger('price_cents')` | no | — | `CHECK (price_cents >= 0)`. |
+| `image_url` | `VARCHAR(2048)` | `$table->string('image_url', 2048)` | yes | `null` | Optional URL; no file upload/storage in scope. |
+| `is_available` | `BOOLEAN` | `$table->boolean('is_available')` | no | `true` | Storefront lists only `true`; admin lists all. |
+| `created_at` | `TIMESTAMPTZ` | `$table->timestampTz('created_at')` | no | `now()` | |
+| `updated_at` | `TIMESTAMPTZ` | `$table->timestampTz('updated_at')` | no | `now()` | |
 
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| store_id | BIGINT UNSIGNED FK → stores | no | | cascade |
-| name | VARCHAR(120) | no | | |
-| slug | VARCHAR(120) | no | | |
-| description | VARCHAR(500) | yes | null | |
-| image_path | VARCHAR(255) | yes | null | object storage key |
-| sort_order | SMALLINT UNSIGNED | no | 0 | |
-| is_active | BOOLEAN | no | true | |
-| created_at / updated_at | TIMESTAMP | no | | |
-| deleted_at | TIMESTAMP | yes | null | |
+Constraints:
 
-Indexes: `UNIQUE(store_id, slug)`, `INDEX(store_id, is_active, sort_order)`.
+```sql
+ALTER TABLE products ADD CONSTRAINT products_name_check
+    CHECK (btrim(name) <> '');
 
----
-
-### 3.7 `products`
-
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| store_id | BIGINT UNSIGNED FK → stores | no | | redundant scope for integrity |
-| category_id | BIGINT UNSIGNED FK → categories | no | | restrict delete |
-| tax_rate_id | BIGINT UNSIGNED FK → tax_rates | no | | restrict delete |
-| name | VARCHAR(140) | no | | |
-| slug | VARCHAR(160) | no | | |
-| sku | VARCHAR(64) | yes | null | unique per store when set |
-| description | TEXT | yes | null | |
-| base_price_cents | BIGINT UNSIGNED | no | 0 | variant deltas added |
-| image_path | VARCHAR(255) | yes | null | |
-| dietary_tags | JSON | yes | null | e.g. `["vegan","gluten_free"]` |
-| allergens | JSON | yes | null | e.g. `["milk","nuts"]` |
-| sort_order | SMALLINT UNSIGNED | no | 0 | |
-| is_active | BOOLEAN | no | true | hidden from kiosk when false |
-| is_available | BOOLEAN | no | true | manual "sold out" toggle |
-| available_from | TIME | yes | null | reserved for scheduled availability |
-| available_until | TIME | yes | null | reserved |
-| created_at / updated_at | TIMESTAMP | no | | |
-| deleted_at | TIMESTAMP | yes | null | |
-
-Indexes: `UNIQUE(store_id, slug)`, `UNIQUE(store_id, sku)`, `INDEX(store_id, is_active, is_available, sort_order)`, `INDEX(category_id)`.
-Constraint: `category.store_id = product.store_id` enforced in application layer (and a trigger if desired).
-
----
-
-### 3.8 `product_variants`
-
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| product_id | BIGINT UNSIGNED FK → products | no | | cascade |
-| name | VARCHAR(80) | no | | e.g. "Large" |
-| sku | VARCHAR(64) | yes | null | |
-| price_delta_cents | BIGINT | no | 0 | signed; can be negative |
-| is_default | BOOLEAN | no | false | exactly one default per product with variants |
-| sort_order | SMALLINT UNSIGNED | no | 0 | |
-| is_active | BOOLEAN | no | true | |
-| created_at / updated_at | TIMESTAMP | no | | |
-| deleted_at | TIMESTAMP | yes | null | |
-
-Indexes: `UNIQUE(product_id, name)`, `INDEX(product_id, is_active)`.
-
----
-
-### 3.9 `modifier_groups`
-
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| store_id | BIGINT UNSIGNED FK → stores | no | | cascade |
-| name | VARCHAR(120) | no | | e.g. "Choose milk" |
-| description | VARCHAR(300) | yes | null | |
-| min_select | TINYINT UNSIGNED | no | 0 | |
-| max_select | TINYINT UNSIGNED | yes | null | null = unlimited |
-| is_required | BOOLEAN | no | false | must agree with min_select > 0 |
-| sort_order | SMALLINT UNSIGNED | no | 0 | |
-| created_at / updated_at | TIMESTAMP | no | | |
-| deleted_at | TIMESTAMP | yes | null | |
-
-Indexes: `INDEX(store_id)`.
-Constraint: `max_select IS NULL OR max_select >= min_select`.
-
-### 3.10 `product_modifier_group` (pivot)
-
-| Column | Type | Null | Notes |
-| --- | --- | --- | --- |
-| product_id | BIGINT UNSIGNED FK → products | no | cascade |
-| modifier_group_id | BIGINT UNSIGNED FK → modifier_groups | no | cascade |
-| sort_order | SMALLINT UNSIGNED | no | 0 |
-
-Primary key `(product_id, modifier_group_id)`.
-
-### 3.11 `modifiers`
-
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| modifier_group_id | BIGINT UNSIGNED FK → modifier_groups | no | | cascade |
-| name | VARCHAR(120) | no | | |
-| price_delta_cents | BIGINT | no | 0 | signed |
-| is_default | BOOLEAN | no | false | preselect in UI |
-| sort_order | SMALLINT UNSIGNED | no | 0 | |
-| is_active | BOOLEAN | no | true | |
-| created_at / updated_at | TIMESTAMP | no | | |
-| deleted_at | TIMESTAMP | yes | null | |
-
-Indexes: `UNIQUE(modifier_group_id, name)`, `INDEX(modifier_group_id, is_active)`.
-
----
-
-### 3.12 `promo_codes`
-
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| store_id | BIGINT UNSIGNED FK → stores | no | | cascade |
-| code | VARCHAR(40) | no | | stored uppercase, unique per store |
-| description | VARCHAR(200) | yes | null | |
-| type | VARCHAR(16) | no | | `percentage`, `fixed` |
-| value | INT UNSIGNED | no | | bps for percentage (1000 = 10%), minor units for fixed |
-| min_subtotal_cents | BIGINT UNSIGNED | no | 0 | |
-| starts_at | TIMESTAMP | yes | null | |
-| ends_at | TIMESTAMP | yes | null | |
-| max_redemptions | INT UNSIGNED | yes | null | null = unlimited |
-| times_redeemed | INT UNSIGNED | no | 0 | |
-| is_active | BOOLEAN | no | true | |
-| created_at / updated_at | TIMESTAMP | no | | |
-| deleted_at | TIMESTAMP | yes | null | |
-
-Indexes: `UNIQUE(store_id, code)`, `INDEX(store_id, is_active, starts_at, ends_at)`.
-Redemption increments inside a transaction with `SELECT ... FOR UPDATE`.
-
----
-
-### 3.13 `orders`
-
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| store_id | BIGINT UNSIGNED FK → stores | no | | restrict |
-| kiosk_id | BIGINT UNSIGNED FK → kiosks | yes | null | null for counter/staff orders |
-| created_by_user_id | BIGINT UNSIGNED FK → users | yes | null | counter orders |
-| order_number | VARCHAR(16) | no | | e.g. `A-0042` |
-| business_date | DATE | no | | store-local date |
-| status | VARCHAR(32) | no | `draft` | see enum below |
-| channel | VARCHAR(16) | no | `kiosk` | `kiosk`, `counter` |
-| currency | CHAR(3) | no | | snapshot of store currency |
-| subtotal_cents | BIGINT UNSIGNED | no | 0 | sum of line totals |
-| discount_cents | BIGINT UNSIGNED | no | 0 | |
-| tax_cents | BIGINT UNSIGNED | no | 0 | |
-| total_cents | BIGINT UNSIGNED | no | 0 | |
-| promo_code_id | BIGINT UNSIGNED FK → promo_codes | yes | null | restrict delete |
-| promo_code_snapshot | VARCHAR(40) | yes | null | denormalized for history |
-| customer_name | VARCHAR(120) | yes | null | |
-| customer_email | VARCHAR(160) | yes | null | for receipt |
-| note | VARCHAR(500) | yes | null | |
-| cancel_reason | VARCHAR(255) | yes | null | |
-| idempotency_key | VARCHAR(64) | yes | null | supplied by client |
-| expires_at | TIMESTAMP | yes | null | draft/pending TTL |
-| placed_at | TIMESTAMP | yes | null | when submitted |
-| paid_at | TIMESTAMP | yes | null | |
-| completed_at | TIMESTAMP | yes | null | |
-| cancelled_at | TIMESTAMP | yes | null | |
-| created_at / updated_at | TIMESTAMP | no | | |
+ALTER TABLE products ADD CONSTRAINT products_price_cents_check
+    CHECK (price_cents >= 0);
+```
 
 Indexes:
-- `UNIQUE(store_id, business_date, order_number)`
-- `UNIQUE(store_id, idempotency_key)` (NULLs allowed multiple times in MySQL)
-- `INDEX(store_id, status, created_at)`
-- `INDEX(store_id, business_date)`
-- `INDEX(kiosk_id, created_at)`
-- `INDEX(expires_at)` for expiry job
 
-**Status enum:** `draft`, `pending_payment`, `paid`, `preparing`, `ready`, `completed`, `cancelled`, `refunded`.
-**Allowed transitions:**
+- `INDEX products_is_available_name_index (is_available, name)` — supports the public available-product listing and name ordering.
+- No unique constraint on `name`; duplicate product names are allowed. See open questions.
 
-| From | To |
+### 4.3 `orders`
+
+| Column | PostgreSQL type | Laravel type | Null | Default | Constraints / notes |
+| --- | --- | --- | --- | --- | --- |
+| `id` | `BIGINT` | `$table->id()` | no | identity | Primary key. |
+| `order_number` | `VARCHAR(32)` | `$table->string('order_number', 32)->storedAs(...)` | no | generated from `id` | Unique. Also the receipt number. |
+| `receipt_token` | `CHAR(64)` | `$table->char('receipt_token', 64)` | no | — | Unique, unguessable public receipt token. Generated by the application. |
+| `status` | `VARCHAR(16)` | `$table->string('status', 16)` | no | `'pending'` | `pending`, `completed`, `cancelled`. |
+| `payment_method` | `VARCHAR(16)` | `$table->string('payment_method', 16)` | no | — | `cash`, `online`. Required; no default. |
+| `payment_status` | `VARCHAR(16)` | `$table->string('payment_status', 16)` | no | `'unpaid'` | `unpaid`, `paid`. |
+| `payment_reference` | `VARCHAR(64)` | `$table->string('payment_reference', 64)` | yes | `null` | Mock reference only, e.g. `MOCK-<ULID>`. Required for `online`. |
+| `total_cents` | `BIGINT` | `$table->bigInteger('total_cents')` | no | — | Sum of line totals; `CHECK (total_cents >= 0)`. |
+| `paid_at` | `TIMESTAMPTZ` | `$table->timestampTz('paid_at')` | yes | `null` | Set for online orders at creation and when an admin marks cash paid. |
+| `created_at` | `TIMESTAMPTZ` | `$table->timestampTz('created_at')` | no | `now()` | |
+| `updated_at` | `TIMESTAMPTZ` | `$table->timestampTz('updated_at')` | no | `now()` | |
+
+`order_number` is a PostgreSQL generated column derived from the primary key:
+
+```sql
+order_number VARCHAR(32)
+    GENERATED ALWAYS AS (
+        'ORD-' || lpad(id::text, greatest(6, length(id::text)), '0')
+    ) STORED
+```
+
+`lpad(..., greatest(6, length(...)), '0')` pads to a minimum of six digits and does not truncate values above 999999. The primary-key sequence is concurrency-safe. Gaps are allowed and expected when a transaction rolls back; numbers are never reused. The order number is derived from the internal ID but is not used as a security boundary; public receipt access still requires `receipt_token`.
+
+Laravel equivalent: define `$table->id()` before `$table->string('order_number', 32)->storedAs("'ORD-' || lpad(id::text, greatest(6, length(id::text)), '0')")`. Never include `order_number` in an insert or update payload.
+
+Constraints:
+
+```sql
+ALTER TABLE orders ADD CONSTRAINT orders_status_check
+    CHECK (status IN ('pending', 'completed', 'cancelled'));
+
+ALTER TABLE orders ADD CONSTRAINT orders_payment_method_check
+    CHECK (payment_method IN ('cash', 'online'));
+
+ALTER TABLE orders ADD CONSTRAINT orders_payment_status_check
+    CHECK (payment_status IN ('unpaid', 'paid'));
+
+ALTER TABLE orders ADD CONSTRAINT orders_total_cents_check
+    CHECK (total_cents >= 0);
+
+ALTER TABLE orders ADD CONSTRAINT orders_online_paid_check
+    CHECK (payment_method <> 'online' OR payment_status = 'paid');
+
+ALTER TABLE orders ADD CONSTRAINT orders_online_reference_check
+    CHECK (payment_method <> 'online' OR payment_reference IS NOT NULL);
+
+ALTER TABLE orders ADD CONSTRAINT orders_paid_at_check
+    CHECK (
+        (payment_status = 'paid' AND paid_at IS NOT NULL)
+        OR (payment_status = 'unpaid' AND paid_at IS NULL)
+    );
+
+ALTER TABLE orders ADD CONSTRAINT orders_order_number_format_check
+    CHECK (order_number ~ '^ORD-[0-9]{6,}$');
+
+ALTER TABLE orders ADD CONSTRAINT orders_receipt_token_format_check
+    CHECK (receipt_token ~ '^[0-9a-f]{64}$');
+```
+
+Indexes / unique constraints:
+
+- `UNIQUE (order_number)` — order number and receipt number.
+- `UNIQUE (receipt_token)` — public receipt lookup.
+- `INDEX orders_created_at_index (created_at)` — default admin order list.
+- `INDEX orders_status_created_at_index (status, created_at)` — admin status filter.
+- `INDEX orders_payment_status_created_at_index (payment_status, created_at)` — unpaid/paid filter.
+
+No foreign key to `users`: orders are guest orders, and admin actions are not recorded in this scope.
+
+### 4.4 `order_items`
+
+| Column | PostgreSQL type | Laravel type | Null | Default | Constraints / notes |
+| --- | --- | --- | --- | --- | --- |
+| `id` | `BIGINT` | `$table->id()` | no | identity | Primary key. |
+| `order_id` | `BIGINT` | `$table->foreignId('order_id')` | no | — | FK → `orders.id`, `ON DELETE RESTRICT`. |
+| `product_id` | `BIGINT` | `$table->foreignId('product_id')->nullable()` | yes | `null` | FK → `products.id`, `ON DELETE SET NULL`. |
+| `product_name` | `VARCHAR(140)` | `$table->string('product_name', 140)` | no | — | Snapshot at checkout. `CHECK (btrim(product_name) <> '')`. |
+| `quantity` | `SMALLINT` | `$table->smallInteger('quantity')` | no | — | `CHECK (quantity BETWEEN 1 AND 99)`. |
+| `unit_price_cents` | `BIGINT` | `$table->bigInteger('unit_price_cents')` | no | — | Snapshot at checkout; `CHECK (unit_price_cents >= 0)`. |
+| `line_total_cents` | `BIGINT` | `$table->bigInteger('line_total_cents')` | no | — | Snapshot; must equal `unit_price_cents * quantity`. |
+| `created_at` | `TIMESTAMPTZ` | `$table->timestampTz('created_at')` | no | `now()` | Immutable; no `updated_at`. |
+
+Constraints:
+
+```sql
+ALTER TABLE order_items ADD CONSTRAINT order_items_quantity_check
+    CHECK (quantity BETWEEN 1 AND 99);
+
+ALTER TABLE order_items ADD CONSTRAINT order_items_unit_price_check
+    CHECK (unit_price_cents >= 0);
+
+ALTER TABLE order_items ADD CONSTRAINT order_items_line_total_check
+    CHECK (line_total_cents = unit_price_cents * quantity);
+
+ALTER TABLE order_items ADD CONSTRAINT order_items_product_name_check
+    CHECK (btrim(product_name) <> '');
+```
+
+Indexes / unique constraints:
+
+- `UNIQUE (order_id, product_id)` — prevents duplicate product lines when `product_id` is present. PostgreSQL permits multiple `NULL` values, so product deletion does not break this constraint.
+- `INDEX order_items_product_id_index (product_id)` — supports the product FK and historical product lookups.
+- The unique `(order_id, product_id)` index also covers `order_id` lookups, so no separate `order_id` index is needed.
+
+Eloquent note: `OrderItem` should set `const UPDATED_AT = null` (or use `$timestamps = false`) because the table has no `updated_at` column. The database default fills `created_at`; the model may also set it explicitly. The order creation service always supplies `product_id`; a `NULL` value is only expected after the referenced product is deleted.
+
+### 4.5 Framework tables
+
+These already exist and are not modified:
+
+- `personal_access_tokens` — Sanctum bearer tokens for admins.
+- `password_reset_tokens`
+- `sessions` — present but not required for bearer-token auth.
+- `cache`, `cache_locks`
+- `jobs`, `job_batches`, `failed_jobs`
+- `migrations`
+
+There is no need to add a session driver or queue table for the MVP.
+
+### 4.6 Eloquent relationships
+
+```php
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+// Order
+public function items(): HasMany
+{
+    return $this->hasMany(OrderItem::class);
+}
+
+// OrderItem
+public function order(): BelongsTo
+{
+    return $this->belongsTo(Order::class);
+}
+
+public function product(): BelongsTo
+{
+    return $this->belongsTo(Product::class);
+}
+
+// Product
+public function orderItems(): HasMany
+{
+    return $this->hasMany(OrderItem::class);
+}
+```
+
+- `OrderItem::product()` may return `null` after a product is hard-deleted; receipts and admin order views must use the snapshot columns (`product_name`, `unit_price_cents`, `quantity`, `line_total_cents`), not the related product.
+- `OrderItem` should set `const UPDATED_AT = null`.
+- `User` has no relationship to orders or products in this scope.
+- Cast `Product.price_cents`, `Order.total_cents`, and `OrderItem.quantity` / `unit_price_cents` / `line_total_cents` to `integer`; cast `Product.is_available` to `boolean` and `Order.paid_at` to `datetime`.
+
+---
+
+## 5. Order number and receipt token strategy
+
+### Order number
+
+- A PostgreSQL stored generated column derived from `orders.id` (see the DDL in §4.3).
+- Format: `ORD-000001`, `ORD-000002`, etc. The expression pads to at least six digits and grows without truncation.
+- Unique at the database level.
+- The receipt number is exactly `orders.order_number`. Do not add a separate `receipt_number` column; `receipt_token` is only the public access token, not a receipt number. The receipt API returns the order number as its receipt number.
+- The order number is not a secret. It may appear on the receipt and in the admin UI. It must not be the only way to fetch a receipt publicly. Public lookup uses `receipt_token`.
+
+### Receipt token
+
+- Generated by the application with a cryptographically secure random source, e.g. `bin2hex(random_bytes(32))`, producing exactly 64 lowercase hex characters.
+- Stored as `CHAR(64)`, unique.
+- Used by the public receipt endpoint: `GET /api/v1/receipts/{receipt_token}`.
+- Never derived from `id`, `order_number`, email, or a timestamp.
+- Stored in plaintext because the receipt contains no customer PII or card data in this scope. If customer PII is added later, consider hashing tokens at rest.
+- No expiry or rotation in the MVP.
+- On the extremely unlikely unique collision, retry token generation before committing.
+
+### Eloquent note
+
+Because `order_number` is a database-generated column, `Order::create([...])` will not initially contain the generated value. Call `$order->refresh()` (or re-query by ID) inside the transaction before building the response. Never insert or update `order_number` manually; PostgreSQL rejects writes to a `GENERATED ALWAYS` column.
+
+---
+
+## 6. Order creation transaction and server-side pricing
+
+The single authoritative write path is an order creation service/action. It must run in one database transaction:
+
+1. Validate the request: at least one item, no duplicate `product_id` values, quantity between 1 and 99, and a valid payment method.
+2. Begin a transaction with the default PostgreSQL isolation level (`READ COMMITTED`).
+3. Load all requested products in one query, filtering `is_available = true`.
+4. Reject the request if any product is missing or unavailable.
+5. Compute each line from the database price:
+   - `unit_price_cents = products.price_cents`
+   - `line_total_cents = unit_price_cents * quantity`
+   - `total_cents = SUM(line_total_cents)`
+6. Insert the `orders` row:
+   - `payment_method = cash` → `payment_status = unpaid`, `paid_at = null`, `payment_reference = null`.
+   - `payment_method = online` → `payment_status = paid`, `paid_at = now()`, `payment_reference = MOCK-<ULID or UUID>`.
+   - Ignore any client-supplied prices or totals.
+7. Insert all `order_items` rows with the snapshotted name, unit price, quantity, and line total.
+8. Refresh/read the generated `order_number`, load the items, and commit.
+9. Return the order with its order number and receipt token.
+
+If any step fails, the transaction rolls back, leaving no order and no orphaned items.
+
+### Concurrency notes
+
+- No stock rows are locked because inventory is out of scope.
+- `READ COMMITTED` is sufficient. A concurrent product price update only affects future orders because the order item stores the price read in this transaction.
+- If strict price/availability consistency against a concurrent admin edit is required, select the products with `FOR SHARE` (ordered by product ID) or use `REPEATABLE READ`. This is optional for the assessment build.
+- A concurrent hard delete of a product can cause the order-item FK insert to fail; the transaction rolls back. Return a validation/conflict error and let the customer retry.
+- There is no idempotency key in the confirmed scope. A duplicate checkout submission can create two orders. See open questions.
+
+### Cross-row invariants
+
+A simple `CHECK` cannot verify that `orders.total_cents` equals the sum of its `order_items.line_total_cents`, or that an order has at least one item. These are enforced by the single order-creation service and covered by feature tests. The line-level equality and all scalar checks are enforced by PostgreSQL. A deferred constraint trigger is possible but intentionally not used in this 1–2 day build.
+
+---
+
+## 7. Status and payment values
+
+| Field | Allowed values | Default | Rules |
+| --- | --- | --- | --- |
+| `orders.status` | `pending`, `completed`, `cancelled` | `pending` | Admin may update. The DB validates the value; transition rules are application-level. |
+| `orders.payment_method` | `cash`, `online` | none | Must be chosen at checkout. |
+| `orders.payment_status` | `unpaid`, `paid` | `unpaid` | Cash starts `unpaid`; online is always `paid`. |
+| `orders.payment_reference` | free text, mock only | `null` | Required for online. |
+
+### Order status behavior
+
+The confirmed scope only requires an admin to update status; it does not define a strict state machine. For the 1-2 day MVP, the API accepts any of the three values, and setting the current value is an idempotent no-op.
+
+A future version may restrict transitions to:
+
+- `pending` → `completed`
+- `pending` → `cancelled`
+- `completed` → `cancelled` (correction only; no refund is performed)
+- `cancelled` terminal
+
+Transition enforcement is intentionally deferred and recorded as an open question.
+
+### Payment rules
+
+- A cash order starts `unpaid` with `paid_at = null`.
+- An admin marking a cash order paid sets `payment_status = paid` and `paid_at = now()`.
+- A mock online order is created `paid` with `paid_at = now()` and a `payment_reference`.
+- `paid` is terminal in this scope because refunds are out of scope.
+- Cancelling an order does not change `payment_status` and does not issue a refund. A paid cancelled order remains `paid`.
+- The database prevents `online` orders from being `unpaid` and prevents `paid` orders from lacking `paid_at`.
+
+---
+
+## 8. Deletion behavior and historical snapshots
+
+- Products may be hard-deleted by an admin.
+- `order_items.product_id` uses `ON DELETE SET NULL`, not `CASCADE`. Deleting a product never deletes the order item row and never changes its snapshot columns.
+- Historical data survives through `order_items.product_name`, `unit_price_cents`, `quantity`, and `line_total_cents`. `SET NULL` changes only the nullable FK reference, not the snapshot data. If FR-A08 is interpreted as "no column on the order item may change at all," use soft-deleted products instead (see open questions).
+- Changing a product's name, price, description, image, or availability does not modify existing order items.
+- Order items are immutable after creation. There is no order-edit API.
+- Orders are never deleted by the application. Cancelling an order changes `status`; it does not delete the order or its items. `ON DELETE RESTRICT` on `order_items.order_id` prevents deleting an order while items still exist, preserving financial history.
+- There are no soft-deleted products. If soft deletion is preferred later, add `deleted_at`, keep the product row, and change the order-item FK from `SET NULL` to `RESTRICT`; that is a schema change and an open question.
+
+---
+
+## 9. Integrity enforcement matrix
+
+| Invariant | Enforced by |
 | --- | --- |
-| draft | pending_payment, cancelled |
-| pending_payment | paid, cancelled |
-| paid | preparing, refunded, cancelled |
-| preparing | ready, cancelled |
-| ready | completed |
-| completed | refunded |
-| cancelled / refunded | (terminal) |
+| Order number unique | `UNIQUE (order_number)` + generated column derived from `id` |
+| Receipt token unique and unguessable | `UNIQUE (receipt_token)` + CSPRNG generation |
+| Status/payment values | `CHECK` constraints |
+| Non-negative prices, line totals, order total | `CHECK` constraints |
+| Quantity 1–99 | `CHECK` + Form Request validation |
+| Line total equals unit price × quantity | `CHECK` |
+| Paid order has `paid_at`; unpaid has no `paid_at` | `CHECK` |
+| Online order is paid and has a mock reference | `CHECK` |
+| At least one item per order | Order creation service + feature test |
+| Duplicate product lines rejected | `UNIQUE (order_id, product_id)` + Form Request validation |
+| Order total equals sum of line totals | Order creation service + feature test |
+| Unavailable product cannot be ordered | Order creation service query + validation |
+| Product deletion preserves history | `ON DELETE SET NULL` + snapshot columns |
+| No negative stock | No stock column; availability is boolean only |
 
 ---
 
-### 3.14 `order_items`
+## 10. Migration order and rollback
 
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| order_id | BIGINT UNSIGNED FK → orders | no | | cascade |
-| product_id | BIGINT UNSIGNED FK → products | yes | null | set null if hard-deleted |
-| variant_id | BIGINT UNSIGNED FK → product_variants | yes | null | set null if hard-deleted |
-| tax_rate_id | BIGINT UNSIGNED FK → tax_rates | yes | null | |
-| product_name | VARCHAR(140) | no | | snapshot |
-| variant_name | VARCHAR(80) | yes | null | snapshot |
-| sku | VARCHAR(64) | yes | null | snapshot |
-| unit_price_cents | BIGINT UNSIGNED | no | | product + variant + modifiers |
-| quantity | SMALLINT UNSIGNED | no | 1 | 1–99 |
-| line_subtotal_cents | BIGINT UNSIGNED | no | | unit × qty |
-| line_discount_cents | BIGINT UNSIGNED | no | 0 | allocated share |
-| line_tax_cents | BIGINT UNSIGNED | no | 0 | |
-| line_total_cents | BIGINT UNSIGNED | no | | |
-| note | VARCHAR(255) | yes | null | |
-| created_at / updated_at | TIMESTAMP | no | | |
+The existing framework migrations are already present and must not be edited:
 
-Indexes: `INDEX(order_id)`, `INDEX(product_id)`.
+1. `0001_01_01_000000_create_users_table.php`
+2. `0001_01_01_000001_create_cache_table.php`
+3. `0001_01_01_000002_create_jobs_table.php`
+4. `2026_11_05_152853_create_personal_access_tokens_table.php`
 
-### 3.15 `order_item_modifiers`
+New migrations should run in this order:
 
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| order_item_id | BIGINT UNSIGNED FK → order_items | no | | cascade |
-| modifier_id | BIGINT UNSIGNED FK → modifiers | yes | null | set null if hard-deleted |
-| modifier_group_name | VARCHAR(120) | no | | snapshot |
-| modifier_name | VARCHAR(120) | no | | snapshot |
-| unit_price_delta_cents | BIGINT | no | 0 | snapshot |
-| quantity | TINYINT UNSIGNED | no | 1 | |
-| line_total_cents | BIGINT | no | 0 | delta × qty |
-| created_at / updated_at | TIMESTAMP | no | | |
+1. `add_is_admin_to_users_table` — `Schema::table('users', ...)` adding `is_admin`.
+2. `create_products_table` — products and its checks/indexes.
+3. `create_orders_table` — orders, its checks/indexes, and the generated `order_number` column.
+4. `create_order_items_table` — order items, FKs, checks, and indexes.
 
-Indexes: `INDEX(order_item_id)`.
+Rollback must run in reverse:
+
+1. Drop `order_items`.
+2. Drop `orders`.
+3. Drop `products`.
+4. Drop `users.is_admin`.
+
+`down()` methods must only remove objects created by these migrations. Never drop or reset the `keyosk` database from a migration or seeder. `migrate:fresh` is acceptable only in local/test databases after approval; it must never be used against an existing production database.
+
+`is_admin` rollback drops the column and therefore loses admin flags; it is a development-only operation and requires approval in any environment with real users.
 
 ---
 
-### 3.16 `payments`
+## 11. Seed data
 
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| order_id | BIGINT UNSIGNED FK → orders | no | | cascade |
-| provider | VARCHAR(32) | no | | `stripe`, `cash`, `manual` |
-| method | VARCHAR(16) | no | | `card`, `cash` |
-| status | VARCHAR(32) | no | `requires_payment_method` | see enum |
-| provider_intent_id | VARCHAR(120) | yes | null | e.g. Stripe PaymentIntent |
-| provider_payment_id | VARCHAR(120) | yes | null | charge id |
-| amount_cents | BIGINT UNSIGNED | no | | requested |
-| captured_amount_cents | BIGINT UNSIGNED | no | 0 | |
-| refunded_amount_cents | BIGINT UNSIGNED | no | 0 | |
-| currency | CHAR(3) | no | | |
-| failure_code | VARCHAR(80) | yes | null | |
-| failure_message | VARCHAR(255) | yes | null | |
-| idempotency_key | VARCHAR(64) | yes | null | |
-| paid_at | TIMESTAMP | yes | null | |
-| created_at / updated_at | TIMESTAMP | no | | |
+Optional but recommended for the assessment:
 
-Indexes:
-- `UNIQUE(provider, provider_payment_id)`
-- `UNIQUE(order_id, idempotency_key)`
-- `INDEX(order_id, status)`
-- `INDEX(status, created_at)`
+- One admin user, e.g. `admin@keyosk.test`, with `is_admin = true`.
+- Password from an environment variable or a clearly marked local-only value; never commit a production password.
+- A small set of demo products (for example 6–10) with mixed availability.
+- No seeded orders; orders should be created through the API or tests.
+- Seeders must be idempotent and guarded by `APP_ENV !== 'production'`.
 
-**Status enum:** `requires_payment_method`, `processing`, `succeeded`, `failed`, `cancelled`, `partially_refunded`, `refunded`.
-
-### 3.17 `refunds`
-
-| Column | Type | Null | Default | Notes |
-| --- | --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto | |
-| payment_id | BIGINT UNSIGNED FK → payments | no | | restrict |
-| order_id | BIGINT UNSIGNED FK → orders | no | | denormalized for reporting |
-| requested_by_user_id | BIGINT UNSIGNED FK → users | yes | null | |
-| approved_by_user_id | BIGINT UNSIGNED FK → users | yes | null | required above threshold |
-| amount_cents | BIGINT UNSIGNED | no | | > 0 |
-| reason | VARCHAR(255) | yes | null | |
-| status | VARCHAR(16) | no | `pending` | `pending`, `succeeded`, `failed` |
-| provider_refund_id | VARCHAR(120) | yes | null | |
-| failure_message | VARCHAR(255) | yes | null | |
-| created_at / updated_at | TIMESTAMP | no | | |
-
-Indexes: `INDEX(payment_id)`, `INDEX(order_id)`, `UNIQUE(provider_refund_id)`.
-Invariant: `SUM(succeeded refunds.amount_cents) <= payments.captured_amount_cents`.
+There is no customer user seed because customers are guests.
 
 ---
 
-### 3.18 `order_status_histories` (append-only)
+## 12. Assumptions (approved)
 
-| Column | Type | Null | Notes |
-| --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto |
-| order_id | BIGINT UNSIGNED FK → orders | no | cascade |
-| from_status | VARCHAR(32) | yes | null on creation |
-| to_status | VARCHAR(32) | no | |
-| actor_type | VARCHAR(16) | yes | `kiosk`, `user`, `system` |
-| actor_id | BIGINT UNSIGNED | yes | kiosk/user id, no FK (polymorphic) |
-| reason | VARCHAR(255) | yes | |
-| created_at | TIMESTAMP | no | |
+These design assumptions were approved on 2026-11-06 and describe the delivered schema.
 
-Indexes: `INDEX(order_id, created_at)`.
-
-### 3.19 `audit_logs` (append-only)
-
-| Column | Type | Null | Notes |
-| --- | --- | --- | --- |
-| id | BIGINT UNSIGNED PK | no | auto |
-| store_id | BIGINT UNSIGNED | yes | |
-| actor_type | VARCHAR(16) | yes | `user`, `kiosk`, `system` |
-| actor_id | BIGINT UNSIGNED | yes | |
-| action | VARCHAR(80) | no | e.g. `product.updated` |
-| entity_type | VARCHAR(80) | yes | |
-| entity_id | BIGINT UNSIGNED | yes | |
-| before | JSON | yes | |
-| after | JSON | yes | |
-| ip_address | VARCHAR(45) | yes | |
-| user_agent | VARCHAR(255) | yes | |
-| created_at | TIMESTAMP | no | |
-
-Indexes: `INDEX(store_id, created_at)`, `INDEX(actor_type, actor_id)`, `INDEX(action, created_at)`, `INDEX(entity_type, entity_id)`.
-
-### 3.20 Framework tables
-
-Standard Laravel tables also present: `personal_access_tokens`, `password_reset_tokens`, `sessions`, `cache`, `cache_locks`, `jobs`, `job_batches`, `failed_jobs`, `migrations`.
+1. The MVP uses a single currency configured by the backend (assumed USD). No `currency` column is stored on orders, so changing the configured currency would also change how historical receipts are formatted. Add a currency snapshot if historical currency accuracy is required.
+2. Products are hard-deleted, not soft-deleted.
+3. Order numbers are global and sequential, derived from `orders.id` and starting at `ORD-000001`; they are not reset daily. Gaps from rolled-back transactions are acceptable.
+4. Receipt tokens are 64 lowercase hex characters, stored in plaintext, and do not expire.
+5. There is exactly one payment per order, so payment fields live on `orders` rather than in a `payments` table.
+6. Order items are immutable and order total is computed once at creation.
+7. Orders are never deleted by the application; cancellation is a status change.
+8. Product names need not be unique.
+9. A product price of `0` is allowed, so an order total of `0` is possible if all items are free. If free products are not intended, change the price check to `> 0` and enforce it in the request validation.
+10. Admin users have a single boolean capability; there are no roles or per-store scopes.
+11. Admin actions are not audited; there is no status-history table.
+12. Timestamps are stored with time zone (`TIMESTAMPTZ`) and displayed as UTC by the API.
+13. There is no idempotency key; a duplicate checkout request can create a duplicate order.
+14. There is no customer name, email, phone, or order note.
 
 ---
 
-## 4. Total calculation algorithm
+## 13. Open database questions (resolved)
 
-Authoritative implementation lives in a single service (`OrderTotalsCalculator`), used by both preview and persistence.
+These questions were resolved by the approved decisions in `docs/IMPLEMENTATION_PLAN.md` section 9. The list is retained as a record of the clarification questions.
 
-```
-for each cart line:
-    unit = product.base_price + variant.delta + Σ(modifier.delta × modifier.qty)
-    line_subtotal = unit × qty
-
-subtotal = Σ line_subtotal
-discount = min(apply_promo(subtotal), subtotal)          // promo: bps or fixed
-discounted_subtotal = subtotal − discount
-
-// allocate discount proportionally to lines (largest-remainder rounding)
-for each line:
-    line_discount = round(discounted allocation)
-    taxable_base = line_subtotal − line_discount
-
-if tax_inclusive:
-    line_tax   = round(taxable_base × rate_bps / (10000 + rate_bps))
-    line_total = taxable_base
-else:
-    line_tax   = round(taxable_base × rate_bps / 10000)
-    line_total = taxable_base + line_tax
-
-tax   = Σ line_tax
-total = subtotal − discount + tax
-```
-
-Rules:
-- Round half-up to the nearest minor unit per line; adjust the largest line for any residual so `Σ line_total == total`.
-- The API stores and returns integer amounts only.
-- `discount_cents`, `tax_cents`, `total_cents` are recomputed server-side and compared against any client preview; mismatch returns `422 TOTAL_MISMATCH`.
+1. **Currency:** What currency and locale should be displayed? Should `orders` snapshot `currency CHAR(3)` so historical receipts remain correct if configuration changes?
+2. **Product deletion:** Is hard delete acceptable, or should products be soft-deleted (`deleted_at`) so the admin can restore them? If soft delete is required, the order-item FK should change to `RESTRICT` and product queries must exclude trashed rows by default.
+3. **Order numbers:** Is `ORD-000001` acceptable, or does the assessment require a specific format, a non-sequential/opaque value, or a daily reset? Those alternatives need a different concurrency-safe numbering strategy (for example a dedicated sequence and formatter function).
+4. **Receipt token:** Should the token expire, be rotated, or be hashed at rest? The current design assumes no expiry and no PII in receipts.
+5. **Status transitions:** May an admin freely set any of `pending`, `completed`, and `cancelled`, or must the service enforce the recommended transitions? May a `completed` order return to `pending`?
+6. **Paid cancellations:** May a paid order be cancelled without a refund? Refunds are out of scope, so the current design allows it.
+7. **Free products:** Should `price_cents = 0` be allowed, or must every product have a positive price?
+8. **Duplicate submissions:** Is an idempotency key required for order creation? If yes, add a nullable unique `idempotency_key` to `orders` and enforce it in the order service.
+9. **Product names:** Should product names be unique? The current design allows duplicates.
+10. **Order-item product reference:** Is `product_id` allowed to become `NULL` after product deletion, or should the product row be retained permanently (soft delete) to preserve the reference?
+11. **Payment reference:** Is the `MOCK-<ULID>` format acceptable, and should `payment_reference` be unique?
+12. **Admin accounts:** Is a seeded admin sufficient, or does the UI need to create additional admins? No extra table is needed, but the API/UI may need a user-management flow.
+13. **Order timestamps:** Are `completed_at` and `cancelled_at` needed for reporting, or is `updated_at` sufficient?
+14. **Customer details:** Is a customer name or order note required on the receipt? The current design stores neither.
 
 ---
 
-## 5. Data integrity rules
+## 14. Intentionally excluded
 
-1. `products.store_id` must equal `categories.store_id` and `tax_rates.store_id`.
-2. A product with variants must have exactly one active default variant.
-3. `modifier_groups.max_select` is null (unlimited) or `>= min_select`; `is_required` implies `min_select > 0`.
-4. An order's `kiosk_id`, when set, must belong to the same `store_id`.
-5. `order_number` is generated under a per-store row lock / atomic sequence; uniqueness is enforced by the DB.
-6. Payment `captured_amount_cents <= amount_cents`; refunds cannot exceed captured minus already refunded.
-7. Orders in `paid` or later cannot have line items modified; transitions only via the state machine.
-8. Soft-deleted products/categories/modifiers remain readable through order snapshots.
-9. Deleting a store is blocked while orders exist (restrict).
-10. `business_date` is derived from `stores.timezone`, not server time.
+The following are out of scope and must not be added to this schema for the assessment build:
 
----
-
-## 6. Migration order
-
-1. `stores`
-2. `users`, `user_store`
-3. `tax_rates`, `categories`, `products`, `product_variants`
-4. `modifier_groups`, `modifiers`, `product_modifier_group`
-5. `kiosks`
-6. `promo_codes`
-7. `orders`, `order_items`, `order_item_modifiers`, `order_status_histories`
-8. `payments`, `refunds`
-9. `audit_logs`
-10. Framework tables (Laravel defaults)
-
-Each migration must have a working `down()`; destructive changes require a separate cleanup migration.
-
----
-
-## 7. Seed data
-
-`DatabaseSeeder` creates an idempotent demo dataset:
-
-- One store: "Keyosk Demo — Downtown", USD, tax-exclusive, 8.25% tax.
-- Users: `admin@keyosk.test` (admin), `manager@keyosk.test`, `cashier@keyosk.test`, `kitchen@keyosk.test` — known dev password from env only.
-- One active kiosk "Kiosk 1" with a printed pairing code in local/dev output.
-- Categories: Coffee, Tea, Bakery, Cold Drinks.
-- 12 products with 2–4 variants and 3 modifier groups (milk, size extras, syrups).
-- Two promo codes: `WELCOME10` (10% off), `SAVE2` ($2 off, min $10).
-- No seeded orders; a separate `DemoOrderSeeder` can generate orders for reporting tests.
-
-Seeders must never run in production (`APP_ENV=production` guard).
-
----
-
-## 8. Retention and archival
-
-| Data | Retention | Notes |
-| --- | --- | --- |
-| Orders, payments, refunds | 7 years (configurable) | Financial record |
-| Customer name/email | 90 days, then nulled | PII minimization job |
-| Audit logs | 2 years | Append-only |
-| Kiosk heartbeat/app version | 30 days | Only `last_seen_at` in v1 |
-| Failed jobs | 30 days | Laravel prune |
-| Personal access tokens | Revoked/expired pruned daily | Laravel `sanctum:prune-expired` |
-
-Archival job moves closed orders older than the retention window to cold storage, preserving aggregates for reports.
+Inventory/stock counts, stock movements, warehouses, stores, kiosk devices, pairing codes, variants, modifiers, categories, search indexes, promo codes, discounts, taxes, tips, delivery fees, refunds, real payment provider records, webhooks, customer accounts, admin audit logs, order status history, and multi-currency support.
